@@ -1,0 +1,44 @@
+# Guide section 13: test the payment flow in mock mode.
+# Run the requests in order: each one saves values from its response for the next.
+@baseUrl = http://localhost:3000
+
+### 1. Create order
+POST {{baseUrl}}/orders
+Content-Type: application/json
+
+{
+  "amount": 100,
+  "title": "Test ticket"
+}
+
+> {%
+  client.test("order created", () => {
+    client.assert(response.status === 201, "expected 201, got " + response.status);
+    client.assert(response.body.provider === "mock", "expected mock provider");
+  });
+  client.global.set("orderId", response.body.orderId);
+  client.global.set("tradeNO", response.body.tradeNO);
+%}
+
+### 2. Simulate wallet payment (status: PAID | FAILED)
+POST {{baseUrl}}/mock/pay/{{tradeNO}}
+Content-Type: application/json
+
+{
+  "status": "PAID"
+}
+
+> {%
+  client.test("notify acknowledged", () => {
+    client.assert(response.body.result.resultStatus === "S", "expected ack S");
+  });
+%}
+
+### 3. Check order status
+GET {{baseUrl}}/orders/{{orderId}}
+
+> {%
+  client.test("order is paid", () => {
+    client.assert(response.body.status === "PAID", "expected PAID, got " + response.body.status);
+  });
+%}
