@@ -1,0 +1,105 @@
+// Prisma schema: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PaymentStatus {
+  PENDING  //  created,waiting of the user or Safaricom
+  PAID     // confirmed by a verified notify or inquiry(final)
+  FAILED   // safaricom reported a failure
+  EXPIRED  // past ExpiredAt and safaricom conformed  not paid]
+  AMOUNT_MISMATCH  // Safaricom reported  ad diffrent amount/ currency(final)
+}
+
+model Payment  {
+  id          String    @id    // Id sent to safaricom as a payment request id
+  bookingRef  String           // main backend booking
+  attempt    Int    // 1, 2, 3, per booking
+  idempotencyKey String @unique  //from the Idempotency-Key header
+   requestHash String  //sha256 of the canonical create body
+  amountMinor BigInt // What we asked fro in Cents
+  currency String
+  title String
+  customerref String?  // opaque id for the main backend no PII
+  status PaymentStatus @default(PENDING)
+  providerRef String?  @unique  //Safaricom paymentId
+  tradeNo String?
+  paymentUrl String?
+  paidAmountMinor BigInt?  // what safaricom was paid
+  paidCurrency String?
+  late Boolean @default(false)  //setteld after FAILED/EXIPRED
+  duplicate Boolean @default(false) // booking alreadh had a PAI payment
+
+  expiresAt DateTime
+  paidAt DateTime?
+  lastInquiryAt DateTime?   // rate-limits inquiry calls
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+
+  transitions PaymentTransition[]
+  events OutboxEvent[]
+
+  @@unique([bookingRef, attempt])
+  @@index([status, expiresAt]) // reconciler : WHERE status ==? and expiresAt < ?
+  @@index([bookingRef])
+}
+
+//Append-only  audit trail : onr row per status Change
+model PaymentTransition {
+  id        BigInt   @id @default(autoincrement())
+  paymentId String
+  payment Payment  @relation(fields: [paymentId], references: [id])
+  from PaymentStatus? // null for the initila Pending
+  to PaymentStatus
+  source String  // api | notify| inquiry | reconciler
+  detail Json
+  createdAt DateTime  @default(now())
+
+  @@index([paymentId])
+}
+
+//Inbox: every Safaricom notificaton , stored befroe porcessing
+model ProviderNotification{
+  id        BigInt   @id @default(autoincrement())
+  bodyHAsh String @unique
+  paymentId String?
+  providerRef String?
+  signaturevalid Boolean
+  headers Json
+  rawBody String
+  processedAt DateTime?
+  error String?
+  receivedAt DateTime @default(now())
+}
+
+model OutboxEvent {
+  id String @id   // evt....., sent as eventId
+  paymentId String
+  payment Payment  @relation(fields: [paymentId], references: [id])
+  type String  // payment.succeeded
+  payload Json
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now())
+  deliveredAt DateTime?
+  lastError String?
+  createdAd DateTime @default(now())
+
+  @@index([deliveredAt, nextAttemptAt])   //dispather: undelivared  and due
+}
+
+//Replay portetion fro HMACosinged requesta fro the main backend
+model RequestNonce {
+  nonce String @id
+  expriresAt DateTime
+
+  @@index([expriresAt])
+}

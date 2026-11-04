@@ -14,7 +14,7 @@ Mini App ──my.request──▶ Gateway /orders ──▶ Provider (mock | M-
 
 The server-side M-Pesa calls follow the **Alipay+ Mini Program OpenAPI** standard that the M-Pesa platform is built on. Lines marked `// CONFIRM` in `src/providers/mpesa-miniapp.provider.ts` must be checked against the server spec Safaricom provides.
 
-The full build walkthrough is in [`docs/miniapp-gateway-guide.md`](docs/miniapp-gateway-guide.md).
+The full build walkthrough is in [`docs/miniapp-gateway-guide.md`](docs/miniapp-gateway-guide.md). The production architecture and security measures (idempotency, no double charges, events to the main backend) are in [`docs/payment-architecture-and-security.md`](docs/payment-architecture-and-security.md).
 
 ## Setup
 
@@ -26,7 +26,8 @@ Create `.env`:
 
 ```env
 PORT=3000
-PAYMENT_PROVIDER=mock               # mock | mpesa-miniapp
+PAYMENT_PROVIDER=mock               # required: mock | mpesa-miniapp (mock is refused when NODE_ENV=production)
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/miniapp_gateway?schema=public"
 PUBLIC_BASE_URL=https://xxxx.trycloudflare.com
 
 # Only needed for PAYMENT_PROVIDER=mpesa-miniapp
@@ -47,6 +48,18 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ```
 
 `keys/` and `.env` are git-ignored.
+
+### Database
+
+Orders are stored in PostgreSQL via Prisma (schema: `prisma/schema.prisma`).
+
+```bash
+docker compose up -d     # local Postgres matching the DATABASE_URL above
+npm run db:migrate       # apply migrations (dev); creates new ones after schema changes
+npm run db:generate      # regenerate the client into src/generated/prisma (also runs on build)
+```
+
+In production, run `npm run db:deploy` to apply migrations without creating new ones.
 
 ## Run
 
@@ -88,8 +101,9 @@ Manual flow in mock mode: open `test.http` in WebStorm and run the three request
 - `src/providers/mock.provider.ts`: in-memory provider for local development.
 - `src/providers/mpesa-miniapp.provider.ts`: real M-Pesa provider; signs requests and verifies notifications with RSA-SHA256 (`src/common/signature.utils.ts`).
 - `src/app.module.ts`: picks the provider from `PAYMENT_PROVIDER` and registers `MockController` only in mock mode.
-- `src/payments/`: orders/notify controllers and `PaymentsService`, which only moves orders out of `PENDING` once, so repeated notifications are ignored.
-- `src/orders/orders.store.ts`: in-memory order store. Orders are lost on restart.
+- `src/payments/`: orders/notify controllers and `PaymentsService`. `MockController` returns 404 unless the mock provider is active.
+- Notifications are rejected (401) on a bad or malformed signature, or a `Request-Time` more than 5 minutes off. Responses from M-Pesa are signature-checked too.
+- `src/orders/orders.store.ts`: order persistence through `PrismaService` (`src/prisma/`). `settleIfPending` changes status in a single conditional UPDATE, so duplicate or late notifications can't overwrite a final status.
 
 To add another gateway (e.g. Daraja STK Push), implement `PaymentProvider` in a new file under `src/providers/` and add a `case` to the factory in `src/app.module.ts`. See section 16 of the guide.
 
@@ -102,7 +116,6 @@ To add another gateway (e.g. Daraja STK Push), implement `PaymentProvider` in a 
 
 ## Before production
 
-- [ ] Enable `rawBody: true` in `NestFactory.create` (`src/main.ts`). `/payments/notify` needs it for signature verification and currently fails without it.
 - [ ] Gateway domain whitelisted in Domain Preference
 - [ ] Mini App client always confirms via `/orders/:id`, never trusts the `my.tradePay` result alone
-- [ ] Replace the in-memory order store with a database
+- [ ] Server-side pricing and user authentication for `POST /orders` (currently trusts the client's `amount` and `userId`)

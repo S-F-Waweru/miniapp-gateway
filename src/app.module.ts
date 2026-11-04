@@ -9,27 +9,38 @@ import { PaymentsService } from './payments/payament.service.js';
 import { PAYMENT_PROVIDER } from './providers/payment.provider.interface.js';
 import { MpesaMiniAppProvider } from './providers/mpesa-miniapp.provider.js';
 import { MockProvider } from './providers/mock.provider.js';
-
-const isMock = (process.env.PAYMENT_PROVIDER ?? 'mock') === 'mock';
+import { PrismaService } from './prisma/prisma.service.js';
 
 @Module({
-  imports: [ConfigModule.forRoot({isGlobal: true})],
-  controllers: [PaymentsController, ...(isMock ? [MockController] : [])],
+  imports: [ConfigModule.forRoot({ isGlobal: true })],
+  // MockController guards itself: it returns 404 unless the mock provider is active.
+  controllers: [PaymentsController, MockController],
   providers: [
+    PrismaService,
     OrdersStore,
     PaymentsService,
     {
-      provide :PAYMENT_PROVIDER,
-      inject:[ConfigService],
-      useFactory: (conf : ConfigService) => {
-        switch (conf.get('PAYMENT_PROVIDER')) {
+      provide: PAYMENT_PROVIDER,
+      inject: [ConfigService],
+      useFactory: (conf: ConfigService) => {
+        // No default: a missing setting must not silently fall back to fake payments.
+        const name = conf.getOrThrow<string>('PAYMENT_PROVIDER');
+        switch (name) {
           case 'mpesa-miniapp':
             return new MpesaMiniAppProvider(conf);
-          default:
+          case 'mock':
+            if (conf.get('NODE_ENV') === 'production')
+              throw new Error(
+                'PAYMENT_PROVIDER=mock is not allowed when NODE_ENV=production',
+              );
             return new MockProvider();
+          default:
+            throw new Error(
+              `Unknown PAYMENT_PROVIDER "${name}" (expected: mock | mpesa-miniapp)`,
+            );
         }
-      }
-    }
+      },
+    },
   ],
 })
 export class AppModule {}

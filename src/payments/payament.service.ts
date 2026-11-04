@@ -12,20 +12,21 @@ export class PaymentsService {
   ) {}
 
   async createOrder(amount: number, title: string, userId?: string) {
-    const order = this.orders.save({
+    const order = await this.orders.create({
       id: uuid().replace(/-/g, ''),
-      amount,
-      title,
-      status: 'PENDING',
-    });
-    const result = await this.provider.createPayment({
-      orderId: order.id,
       amount,
       currency: 'KES',
       title,
       userId,
     });
-    order.providerRef = result.providerRef;
+    const result = await this.provider.createPayment({
+      orderId: order.id,
+      amount,
+      currency: order.currency,
+      title,
+      userId,
+    });
+    await this.orders.setProviderRef(order.id, result.providerRef);
     return {
       orderId: order.id,
       tradeNO: result.tradeNO,
@@ -35,17 +36,19 @@ export class PaymentsService {
   }
 
   async status(id: string) {
-    const order = this.orders.get(id);
+    const order = await this.orders.get(id);
     if (!order) throw new NotFoundException();
-    if (order.status === 'PENDING')
-      order.status = await this.provider.inquire(id); // fallback if notify missed
+    if (order.status === 'PENDING') {
+      // Fallback if the notify was missed
+      const status = await this.provider.inquire(id);
+      if (await this.orders.settleIfPending(id, status)) order.status = status;
+    }
     return order;
   }
 
   async notify(headers: any, raw: string, path: string) {
     const result = await this.provider.handleNotify(headers, raw, path);
-    const order = this.orders.get(result.orderId);
-    if (order && order.status === 'PENDING') order.status = result.status; // idempotent
+    await this.orders.settleIfPending(result.orderId, result.status); // idempotent
     return result.ack;
   }
 }

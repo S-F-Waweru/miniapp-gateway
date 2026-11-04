@@ -17,10 +17,12 @@ npx vitest run -t "should return"           # single test by name
 
 ## Architecture
 
-NestJS 12 app on Express, intended as a gateway for a mini-app payment integration. It is at an early stage: `AppModule` only wires the starter `AppController`/`AppService`, and `src/payments/` and `src/providers/` exist but are empty (planned feature modules).
+NestJS 12 app on Express: a payment gateway between an M-Pesa Mini App and the payment provider (see `README.md` and `docs/miniapp-gateway-guide.md`). Providers implement `PaymentProvider` (`src/providers/payment.provider.interface.ts`) and are chosen by a factory in `src/app.module.ts`; `PaymentsService` (`src/payments/payament.service.ts`, filename typo) orchestrates orders, provider calls and notifications.
 
 - **ESM throughout**: `package.json` has `"type": "module"` and tsconfig uses `nodenext`. Relative imports must include the `.js` extension (e.g. `import { AppService } from './app.service.js'`). `main.ts` uses top-level `await`.
 - **Request signing** (`src/common/signature.utils.ts`): RSA-SHA256 signing/verification over the canonical string `"<METHOD> <path>\n<clientId>.<timestamp>.<body>"`. The signature header has the form `algorithm=RSA256,keyVersion=1,signature=<url-encoded base64>`. `verifySignature` parses only the `signature=` part of that header.
+- **Database**: PostgreSQL via Prisma 7 (`prisma/schema.prisma`, config in `prisma.config.ts`). The client is generated into `src/generated/prisma` (git-ignored, ESM with `.js` imports); run `npm run db:generate` after schema changes, `npm run db:migrate` to create/apply migrations. Prisma 7 needs the `@prisma/adapter-pg` driver adapter (see `src/prisma/prisma.service.ts`).
+- **Provider selection**: `PAYMENT_PROVIDER` is required (`mock` | `mpesa-miniapp`); mock is refused when `NODE_ENV=production`.
 - **Keys**: RSA key pair lives in `keys/private.pem` / `keys/public.pem`, gitignored (`/keys/**`). Never commit or print them.
 - **Lint rules**: `typescript/no-floating-promises` is an error (await or explicitly handle every promise); `no-explicit-any` is off.
 - Tests use Vitest globals (`describe`/`it`/`expect` without imports) and `@nestjs/testing`'s `Test.createTestingModule`; e2e tests use supertest against `AppModule`.
