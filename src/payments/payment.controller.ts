@@ -9,6 +9,8 @@ import {
 } from '@nestjs/common';
 import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { PaymentsService } from './payament.service.js';
+import { Public } from '../auth/public.decorator.js';
+import { Throttle } from '@nestjs/throttler';
 
 class CreateOrderDto {
   @IsNumber() @Min(1) amount: number;
@@ -30,6 +32,8 @@ export class PaymentsController {
     return this.svc.status(id);
   }
 
+  @Public() // Safaricom can't sign with our HMAC; it has its own RSA check
+  @Throttle({ default: { limit: 300, ttl: 60_000 } }) // keyed by IP here
   @Post('payments/notify')
   @HttpCode(200)
   notify(@Req() req: any) {

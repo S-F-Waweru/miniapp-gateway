@@ -1,6 +1,4 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PaymentsController } from './payments/payment.controller.js';
 import { MockController } from './payments/mock.controller.js';
@@ -10,13 +8,28 @@ import { PAYMENT_PROVIDER } from './providers/payment.provider.interface.js';
 import { MpesaMiniAppProvider } from './providers/mpesa-miniapp.provider.js';
 import { MockProvider } from './providers/mock.provider.js';
 import { PrismaService } from './prisma/prisma.service.js';
+import { validateEnv } from './config/env.validation.js';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { NonceStore } from './auth/nonce.store.js';
+import { APP_GUARD } from '@nestjs/core';
+import { ClientThrottlerGuard } from './auth/client-throttler.guards.js';
+import { ServiceAuthGuard } from './auth/service-auth.guard.js';
+
+const isProd = process.env.NODE_ENV === 'production';
 
 @Module({
-  imports: [ConfigModule.forRoot({ isGlobal: true })],
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, validate: validateEnv }),
+    ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }]),
+  ],
   // MockController guards itself: it returns 404 unless the mock provider is active.
-  controllers: [PaymentsController, MockController],
+  controllers: [PaymentsController, ...(isProd ? [] : [MockController])],
   providers: [
     PrismaService,
+    NonceStore,
+    // Order matters: auth runs first, so the throttler can key on serviceClientId.
+    { provide: APP_GUARD, useClass: ServiceAuthGuard },
+    { provide: APP_GUARD, useClass: ClientThrottlerGuard },
     OrdersStore,
     PaymentsService,
     {
