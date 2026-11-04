@@ -1,18 +1,19 @@
 import { ConfigService } from '@nestjs/config';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import axios from 'axios';
-import { readFileSync } from 'fs';
+import { keySource, loadKey } from '../config/keys.js';
 import {
   isFresh,
   signRequest,
   verifySignature,
 } from '../common/signature.utils.js';
-import {
+import type {
   CreatePaymentInput,
   CreatePaymentResult,
-  NotifyResult,
+  ParsedNotification,
   PaymentProvider,
   PayStatus,
+  ProviderOutcome,
 } from './payment.provider.interface.js';
 
 @Injectable()
@@ -22,16 +23,23 @@ export class MpesaMiniAppProvider implements PaymentProvider {
   private readonly pub: string;
 
   constructor(private readonly cfg: ConfigService) {
-    // getOrThrow fails fast at startup if a required env var is missing,
-    // instead of crashing later with an undefined path or header.
-    this.priv = readFileSync(
-      cfg.getOrThrow<string>('MP_PRIVATE_KEY_PATH'),
-      'utf8',
+    // Keys come from a secret manager (env) or a file; both are parsed now,
+    // so a missing or broken key stops startup instead of the first payment.
+    const env = Object.fromEntries(
+      [
+        'MP_PRIVATE_KEY',
+        'MP_PRIVATE_KEY_PATH',
+        'MP_PLATFORM_PUBLIC_KEY',
+        'MP_PLATFORM_PUBLIC_KEY_PATH',
+      ].map((k) => [k, cfg.get<string>(k)]),
     );
-    this.pub = readFileSync(
-      cfg.getOrThrow<string>('MP_PLATFORM_PUBLIC_KEY_PATH'),
-      'utf8',
-    );
+    const priv = keySource(env, 'MP_PRIVATE_KEY');
+    const pub = keySource(env, 'MP_PLATFORM_PUBLIC_KEY');
+    if (!priv || !pub) {
+      throw new Error('M-Pesa keys missing (validated in env.validation.ts)');
+    }
+    this.priv = loadKey(priv, 'private');
+    this.pub = loadKey(pub, 'public');
   }
 
   private async call(path: string, body: unknown): Promise<any> {
@@ -51,6 +59,7 @@ export class MpesaMiniAppProvider implements PaymentProvider {
         // Keep the raw body: the response signature is computed over it.
         responseType: 'text',
         transformResponse: (r: string) => r,
+        timeout: 10_000, // never hang a request thread on Safaricom
       },
     );
     // CONFIRM: Alipay+ signs responses with Response-Time + Signature headers
@@ -77,11 +86,14 @@ export class MpesaMiniAppProvider implements PaymentProvider {
       partnerId: this.cfg.getOrThrow<string>('MP_MERCHANT_ID'),
       appId: this.cfg.getOrThrow<string>('MP_APP_ID'),
       productCode: 'CASHIER_PAYMENT', // CONFIRM
-      paymentRequestId: i.orderId,
+      paymentRequestId: i.paymentId, // our ID: lets us retry/inquire after a timeout
       paymentOrderTitle: i.title,
-      paymentAmount: { currency: i.currency, value: String(i.amount) }, // CONFIRM units (KES vs cents)
+      paymentAmount: {
+        currency: i.currency,
+        value: toProviderAmount(i.amount),
+      },
+      paymentExpiryTime: i.expiresAt.toISOString(), // CONFIRM field name + format
       paymentNotifyUrl: `${this.cfg.getOrThrow<string>('PUBLIC_BASE_URL')}/payments/notify`,
-      ...(i.userId && { userId: i.userId }),
     });
     return {
       tradeNO: d.paymentId, // CONFIRM which field = tradeNO
@@ -89,49 +101,91 @@ export class MpesaMiniAppProvider implements PaymentProvider {
       providerRef: d.paymentId,
     };
   }
-
-  async inquire(orderId: string): Promise<PayStatus> {
+  async inquire(paymentId: string): Promise<ProviderOutcome> {
     const d = await this.call('/v1/payments/inquiryPayment', {
       // CONFIRM
       partnerId: this.cfg.getOrThrow<string>('MP_MERCHANT_ID'),
-      paymentRequestId: orderId,
+      paymentRequestId: paymentId,
     });
-    return d.paymentStatus === 'SUCCESS'
-      ? 'PAID'
-      : d.paymentStatus === 'FAIL'
-        ? 'FAILED'
-        : 'PENDING';
+    return toOutcome(d);
   }
 
-  async handleNotify(
+  verifyNotification(
     h: Record<string, string>,
     raw: string,
     path: string,
-  ): Promise<NotifyResult> {
-    const ok = verifySignature(
-      'POST',
-      path,
-      h['client-id'],
-      h['request-time'],
-      raw,
-      h['signature'],
-      this.pub,
+  ): boolean {
+    return (
+      verifySignature(
+        'POST',
+        path,
+        h['client-id'],
+        h['request-time'],
+        raw,
+        h['signature'],
+        this.pub,
+      ) && isFresh(h['request-time'])
     );
-    if (!ok) throw new UnauthorizedException('bad signature');
-    if (!isFresh(h['request-time']))
-      throw new UnauthorizedException('stale or invalid request-time');
+  }
+
+  parseNotification(raw: string): ParsedNotification {
     const b = JSON.parse(raw);
+    if (typeof b?.paymentRequestId !== 'string') {
+      throw new Error('missing paymentRequestId');
+    }
+    return { paymentId: b.paymentRequestId, outcome: toOutcome(b) };
+  }
+
+  notifyAck() {
+    // CONFIRM the exact acknowledgement body
     return {
-      orderId: b.paymentRequestId,
-      providerRef: b.paymentId,
-      status: b.paymentStatus === 'SUCCESS' ? 'PAID' : 'FAILED',
-      ack: {
-        result: {
-          resultCode: 'SUCCESS',
-          resultStatus: 'S',
-          resultMessage: 'success',
-        },
+      result: {
+        resultCode: 'SUCCESS',
+        resultStatus: 'S',
+        resultMessage: 'success',
       },
     };
   }
+}
+
+// Amounts are whole shillings everywhere ("1500" = KES 1,500), the same unit the
+// main backend sends and Safaricom uses, so nothing is converted.
+// These two functions stay the ONLY place to change if Safaricom's format differs.
+function toProviderAmount(amount: bigint): string {
+  return amount.toString();
+}
+
+// CONFIRM the full list of paymentStatus values with Safaricom.
+// Only EXPLICIT terminal values map to PAID/FAILED. Anything else
+// (PROCESSING, unknown, missing) means "no change", never FAILED.
+const STATUS_MAP: Record<string, PayStatus> = {
+  SUCCESS: 'PAID',
+  FAIL: 'FAILED',
+};
+
+function mapStatus(s: unknown): PayStatus {
+  return typeof s === 'string' && Object.hasOwn(STATUS_MAP, s)
+    ? STATUS_MAP[s]
+    : 'PENDING';
+}
+
+// Inverse of toProviderAmount: whole shillings as a digit string. Returns
+// undefined if unusable, which the settlement rules treat as an amount
+// mismatch (never assume). CONFIRM: if Safaricom ever sends "1500.00",
+// accept a ".00" suffix here, in this one place.
+function fromProviderAmount(v: unknown): bigint | undefined {
+  if (typeof v !== 'string' || !/^\d{1,12}$/.test(v)) return undefined;
+  return BigInt(v);
+}
+
+function toOutcome(d: any): ProviderOutcome {
+  return {
+    status: mapStatus(d?.paymentStatus),
+    providerRef: typeof d?.paymentId === 'string' ? d.paymentId : undefined,
+    amount: fromProviderAmount(d?.paymentAmount?.value),
+    currency:
+      typeof d?.paymentAmount?.currency === 'string'
+        ? d.paymentAmount.currency
+        : undefined,
+  };
 }
