@@ -59,3 +59,22 @@ pids
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+/src/generated/prisma
+
+# Prisma agent skills not relevant to this project (Prisma 7 + local PostgreSQL)
+# Kept in git: prisma-cli, prisma-client-api, prisma-orm-setup
+/.agents/skills/prisma-database-setup
+/.agents/skills/prisma-postgres
+/.agents/skills/prisma-postgres-setup
+/.agents/skills/prisma-mongodb-upgrade
+/.agents/skills/prisma-compute
+/.agents/skills/prisma-upgrade-v7
+/.agents/skills/prisma-driver-adapter-implementation
+/.claude/skills/prisma-database-setup
+/.claude/skills/prisma-postgres
+/.claude/skills/prisma-postgres-setup
+/.claude/skills/prisma-mongodb-upgrade
+/.claude/skills/prisma-compute
+/.claude/skills/prisma-upgrade-v7
+/.claude/skills/prisma-driver-adapter-implementation
