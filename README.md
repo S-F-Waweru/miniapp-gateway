@@ -1,5 +1,21 @@
 # M-Pesa Mini App Payment Gateway
 
+> **Archived (November 2026): kept as a case study.** This was never used in production; a simpler solution replaced it. It is still a full worked example of how a payment gateway is built: idempotent payment creation, a settlement state machine, a transactional outbox, a reconciler, HMAC service auth, and RSA request signing.
+>
+> **What to study**
+> - [`docs/payment-architecture-and-security.md`](docs/payment-architecture-and-security.md): the overall design and why each safeguard exists
+> - Task guides: [settlement](docs/task-4-settlement.md), [outbox](docs/task-5-outbox.md), [reconciler](docs/task-6-reconciler.md), [production](docs/task-7-production.md), [service auth](docs/service-auth.md)
+> - Code: `src/payments/settlement.rules.ts` (pure rules) → `src/payments/payments.store.ts` (`transition()`), `src/outbox/`, `src/reconciler/`
+>
+> **Known gaps against the [Alipay Mini Program OpenAPI](https://miniprogram.alipay.com/docs-demo/miniprogram_demo/mpdev/v1_pay)** (in `src/providers/mpesa-miniapp.provider.ts`, never fixed):
+> - The `pay` response URL is read from `redirectActionForm.redirectUrl`, but the docs return `actionForm.redirectionUrl`.
+> - Two fields the docs require for mini programs are not sent: `paymentFactor: { isCashierPayment: true }` and `extendInfo.customerBelongsTo`.
+> - `productCode` is a guess, and the docs say the wallet assigns it.
+> - The amount unit was never confirmed. The docs' sample suggests minor units (cents), while this code sends whole shillings.
+> - An `ORDER_NOT_EXIST` inquiry result throws an error, but the docs say to treat it as a failed payment.
+>
+> The sections below date from an early version (`/orders` endpoints). The docs and the code are the accurate reference.
+
 A NestJS gateway that sits between an M-Pesa Mini App and the payment provider. It:
 
 - creates orders and returns a `tradeNO` (or `paymentUrl`) for the Mini App's `my.tradePay`
